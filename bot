@@ -1,0 +1,294 @@
+import os
+import io
+import random
+import requests
+import discord
+from discord.ext import commands
+from flask import Flask
+from threading import Thread
+
+# --- Bot Tanımlamaları ---
+description = "Basit matematik işlemleri yapan, kelime türetme oyunu oynayan ve resim gönderebilen bir Discord botu."
+
+intents = discord.Intents.default()
+intents.members = True
+intents.message_content = True
+
+bot = commands.Bot(command_prefix='?', description=description, intents=intents)
+
+# --- Ortam Değişkenlerinden API Tokenleri ---
+DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
+HUGGING_FACE_API_TOKEN = os.environ.get("HUGGING_FACE_API_TOKEN")
+HUGGING_FACE_API_URL = "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0"
+
+# --- Kelime Dosyaları ---
+kelime_dosyalari = [
+    "3 harfli kelimeler.txt",
+    "4 harfli kelimeler.txt",
+    "5 harfli kelimeler.txt",
+    "6 harfli kelimeler.txt",
+    "7 harfli kelimeler.txt",
+    "8 harfli kelimeler.txt",
+    "9 harfli kelimeler.txt"
+]
+
+def kelimeleri_yukle(dosya_adlari):
+    tum_kelimeler = []
+    for dosya_adi in dosya_adlari:
+        try:
+            with open(dosya_adi, 'r', encoding='utf-8') as f:
+                kelimeler = [kelime.strip().lower() for kelime in f]
+                tum_kelimeler.extend(kelimeler)
+        except FileNotFoundError:
+            print(f"Hata: '{dosya_adi}' dosyası bulunamadı.")
+        except Exception as e:
+            print(f"Hata: {e}")
+    return list(set(tum_kelimeler))
+
+kelimeler = kelimeleri_yukle(kelime_dosyalari)
+
+# --- Oyun Durumları ---
+oyun_durumu = {}
+oyun_sayaci = {}
+oynanan_kelimeler = {}
+hata_sayisi = {}
+
+def sonuc_yorum(sonuc: float) -> str:
+    return ""  # İstersen buraya emoji veya mesaj ekleyebilirsin
+
+# --- BOT EVENTS ---
+@bot.event
+async def on_ready():
+    print(f'Logged in as {bot.user} (ID: {bot.user.id})')
+    if not kelimeler:
+        print("UYARI: Kelime listesi boş!")
+    else:
+        print(f"Toplam {len(kelimeler)} benzersiz kelime yüklendi.")
+
+# --- Yardım ve Bilgilendirme Komutları ---
+bot.remove_command('help')
+
+@bot.command(name='help')
+async def help_command(ctx):
+    help_message = (
+        "Merhaba! Ben Hakan Bot :)\n"
+        "\nMatematik:\n"
+        " • **?topla** 12 2\n"
+        " • **?çıkar** 12 2\n"
+        " • **?çarp** 12 2\n"
+        " • **?böl** 12 2\n\n"
+        "Kelime Türetme Oyunu:\n"
+        " • **?kelimetüret** → oyunu başlatır\n"
+        " • **?k** kelime → kelime girersin\n"
+        " • **?oyunubırak** → oyunu bitirir\n\n"
+        "Resimler:\n"
+        " • **?mem** → klasörden rastgele resim gönderir\n"
+        " • **?duck** → rastgele ördek resmi gönderir\n"
+        " • **?gorsel** açıklama → yapay zeka ile resim oluşturur\n\n"
+        "Bilgilendirme:\n"
+        " • **?cevre** → çevreyi korumanın önemi ve faydaları"
+    )
+    await ctx.send(help_message)
+
+@bot.command(name="cevre")
+async def cevre(ctx):
+    mesaj = (
+        "🌿 **Çevreyi Korumak Neden Önemlidir?**\n\n"
+        "• Doğal kaynakların korunmasına yardımcı olur.\n"
+        "• Hava ve su kirliliğini azaltır.\n"
+        "• Biyoçeşitliliği ve ekosistemleri korur.\n"
+        "• İklim değişikliği etkilerini azaltır.\n\n"
+        "💡 **Evde yapabilecekleriniz:**\n"
+        "• Geri dönüşüm ve atık azaltma.\n"
+        "• Enerji tasarrufu (LED ampul, tasarruflu cihazlar).\n"
+        "• Su tasarrufu ve damla sulama kullanımı.\n"
+        "• Toplu taşıma veya bisiklet kullanımı.\n"
+        "• Ağaç dikmek ve yeşil alanları desteklemek.\n\n"
+        "🌍 Küçük adımlar büyük fark yaratır! Herkes çevreyi korumaya katkıda bulunabilir."
+    )
+    await ctx.send(mesaj)
+
+# --- Matematik Komutları ---
+@bot.command()
+async def topla(ctx, left: int, right: int):
+    await ctx.send(f"{left + right}{sonuc_yorum(left+right)}")
+
+@bot.command()
+async def çıkar(ctx, left: int, right: int):
+    await ctx.send(f"{left - right}{sonuc_yorum(left-right)}")
+
+@bot.command()
+async def çarp(ctx, left: int, right: int):
+    await ctx.send(f"{left * right}{sonuc_yorum(left*right)}")
+
+@bot.command()
+async def böl(ctx, left: int, right: int):
+    if right == 0:
+        await ctx.send("❌ Sıfıra bölme hatası!")
+    else:
+        await ctx.send(f"{left / right}{sonuc_yorum(left/right)}")
+
+# --- Kelime Türetme Oyunu ---
+@bot.command(name='kelimetüret')
+async def kelime_türet_başlat(ctx):
+    if not kelimeler:
+        await ctx.send("Kelime listesi boş!")
+        return
+
+    kanal_id = ctx.channel.id
+    kullanıcı_id = ctx.author.id
+
+    if kanal_id in oyun_durumu:
+        await ctx.send("Oyun zaten başladı!")
+        return
+
+    ilk_kelime = random.choice(kelimeler)
+    oyun_durumu[kanal_id] = ilk_kelime
+    oyun_sayaci[kanal_id] = 1
+    oynanan_kelimeler[kanal_id] = [ilk_kelime]
+    hata_sayisi[kullanıcı_id] = 0
+
+    await ctx.send(f"Oyun başladı! İlk kelime: **{ilk_kelime.capitalize()}**")
+
+@bot.command(name='k')
+async def kelime_oyna(ctx, kelime: str):
+    kanal_id = ctx.channel.id
+    kullanıcı_id = ctx.author.id
+
+    if kanal_id not in oyun_durumu:
+        await ctx.send("Oyun başlamadı. `?kelimetüret` yazın.")
+        return
+
+    son_kelime = oyun_durumu[kanal_id]
+    girilen_kelime = kelime.lower()
+
+    if kullanıcı_id not in hata_sayisi:
+        hata_sayisi[kullanıcı_id] = 0
+
+    if girilen_kelime.startswith(son_kelime[-1]) and girilen_kelime in kelimeler and girilen_kelime not in oynanan_kelimeler[kanal_id]:
+        hata_sayisi[kullanıcı_id] = 0
+        oyun_durumu[kanal_id] = girilen_kelime
+        oynanan_kelimeler[kanal_id].append(girilen_kelime)
+        oyun_sayaci[kanal_id] += 1
+        await ctx.send(f"Doğru! Ben düşünüyorum...")
+
+        gecerli_kelimeler = [k for k in kelimeler if k.startswith(girilen_kelime[-1]) and k not in oynanan_kelimeler[kanal_id]]
+        if gecerli_kelimeler:
+            bot_cevabi = random.choice(gecerli_kelimeler)
+            oyun_durumu[kanal_id] = bot_cevabi
+            oynanan_kelimeler[kanal_id].append(bot_cevabi)
+            oyun_sayaci[kanal_id] += 1
+            await ctx.send(f"Benim kelimem: **{bot_cevabi.capitalize()}**")
+        else:
+            await ctx.send("Kelime bulamadım, kazanan sensin!")
+            del oyun_durumu[kanal_id]
+            del oyun_sayaci[kanal_id]
+            del oynanan_kelimeler[kanal_id]
+            if kullanıcı_id in hata_sayisi:
+                del hata_sayisi[kullanıcı_id]
+
+    else:
+        hata_sayisi[kullanıcı_id] += 1
+        kalan = 5 - hata_sayisi[kullanıcı_id]
+        await ctx.send(f"❌ Yanlış! Kalan hakkın: {kalan}")
+        if kalan <= 0:
+            await ctx.send("5 yanlış yaptın, ben kazandım!")
+            del oyun_durumu[kanal_id]
+            del oyun_sayaci[kanal_id]
+            del oynanan_kelimeler[kanal_id]
+            if kullanıcı_id in hata_sayisi:
+                del hata_sayisi[kullanıcı_id]
+
+@bot.command(name='oyunubırak')
+async def oyunu_bitir(ctx):
+    kanal_id = ctx.channel.id
+    if kanal_id in oyun_durumu:
+        del oyun_durumu[kanal_id]
+        del oyun_sayaci[kanal_id]
+        del oynanan_kelimeler[kanal_id]
+        if ctx.author.id in hata_sayisi:
+            del hata_sayisi[ctx.author.id]
+        await ctx.send("Oyun sona erdi.")
+    else:
+        await ctx.send("Aktif oyun yok.")
+
+# --- Resim Komutları ---
+resim_listesi = []
+
+def resimleri_yukle(klasor="images"):
+    try:
+        if not os.path.exists(klasor):
+            return []
+        return [f for f in os.listdir(klasor) if f.lower().endswith((".png", ".jpg", ".jpeg", ".gif"))]
+    except Exception as e:
+        print(f"Resim klasörüne erişim hatası: {e}")
+        return []
+
+@bot.command()
+async def mem(ctx):
+    global resim_listesi
+    klasor = "images"
+    try:
+        if not resim_listesi:
+            resim_listesi = resimleri_yukle(klasor)
+            random.shuffle(resim_listesi)
+
+        if not resim_listesi:
+            await ctx.send("❌ 'images' klasöründe resim yok!")
+            return
+
+        secilen = resim_listesi.pop(0)
+        dosya_yolu = os.path.join(klasor, secilen)
+        with open(dosya_yolu, "rb") as f:
+            picture = discord.File(f, filename=secilen)
+        await ctx.send(file=picture)
+    except Exception as e:
+        await ctx.send(f"⚠️ Hata: {e}")
+
+@bot.command(name='gorsel')
+async def gorsel_olustur(ctx, *, prompt: str):
+    if not HUGGING_FACE_API_TOKEN:
+        await ctx.send("Hugging Face API anahtarı ayarlanmamış. Lütfen bot sahibinize ulaşın.")
+        return
+
+    await ctx.send("⏳ Görsel oluşturuluyor... Bu işlem birkaç saniye sürebilir.")
+
+    try:
+        headers = {"Authorization": f"Bearer {HUGGING_FACE_API_TOKEN}"}
+        payload = {"inputs": prompt}
+
+        response = requests.post(HUGGING_FACE_API_URL, headers=headers, json=payload)
+        response.raise_for_status()
+
+        image_data = response.content
+        file = discord.File(fp=io.BytesIO(image_data), filename="gorsel.jpg")
+        await ctx.send(file=file)
+
+    except requests.exceptions.HTTPError as http_err:
+        if http_err.response.status_code == 401:
+            await ctx.send("❌ Hata: API anahtarınız geçersiz veya eksik.")
+        elif http_err.response.status_code == 503:
+            await ctx.send("❌ Model şu anda indiriliyor veya yoğun. Lütfen birkaç saniye sonra tekrar deneyin.")
+        elif http_err.response.status_code == 404:
+            await ctx.send("❌ Hata: Belirtilen model bulunamadı veya artık geçerli değil. Lütfen bot sahibinize danışın.")
+        else:
+            await ctx.send(f"❌ HTTP hatası oluştu: {http_err}")
+    except requests.exceptions.RequestException as req_err:
+        await ctx.send(f"❌ Görsel oluşturma sırasında bir ağ hatası oluştu: {req_err}")
+    except Exception as e:
+        await ctx.send(f"⚠️ Beklenmeyen bir hata oluştu: {e}")
+
+# --- Basit Web Sunucu (Render için 7/24 çalışması için) ---
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot çalışıyor!"
+
+def run():
+    app.run(host='0.0.0.0', port=8080)
+
+Thread(target=run).start()
+
+# --- BOTU BAŞLAT ---
+bot.run(DISCORD_TOKEN)
